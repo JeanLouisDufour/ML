@@ -35,7 +35,7 @@ def activation_relu(neurons):
 
 def predict(nn_js, samples):
 	""
-	configuration, neuron_shapes, weights = nn_js
+	configuration, weights = nn_js
 	# compil
 	#buf_l = [np.zeros(sh,dtype=np.float32) for sh in neuron_shapes[1:]]
 	#
@@ -47,7 +47,8 @@ def predict(nn_js, samples):
 			assert isinstance(neurons, np.ndarray) # and len(neurons.shape) == 1
 			kind = conf_layer['class_name']
 			if kind == 'Dense':
-				w1,w2 = weights[nxt_w_i:nxt_w_i+2]
+				w1_,w2_ = weights[nxt_w_i:nxt_w_i+2]
+				w1 = np.array(w1_, np.float32); w2 = np.array(w2_, np.float32); 
 				nxt_w_i += 2
 				sh1 = w1.shape
 				assert neurons.shape == sh1[:1]
@@ -68,7 +69,10 @@ def predict(nn_js, samples):
 					# neurons1a *= (np.float32(1)/ np.sum(neurons1a))
 					neurons1a *= (np.float64(1)/ np.sum(neurons1a.astype(np.float64)))
 					neurons1b = tf.nn.softmax(neurons1b)
-					assert np.max(np.abs(neurons1a - neurons1b[0].numpy()) / (neurons1a + neurons1b[0].numpy())) < 1e-6
+					errs = np.abs(neurons1a - neurons1b[0].numpy()) / (neurons1a + neurons1b[0].numpy())
+					if np.max(errs) >= 1e-6:
+						print('???????????????')
+						print(errs)
 				else:
 					assert activ == 'linear'
 				neurons = neurons1a
@@ -188,8 +192,8 @@ at each update during training time, which helps prevent overfitting.
 	#
 	clean(configuration)
 	assert configuration == json.loads(json.dumps(configuration))
-	nn_js = [configuration, neuron_shapes, weights_orig]
-	if False:
+	nn_js = [configuration, weights]
+	if True:
 		fd = open(configuration['name']+'.json', 'w')
 		json.dump(nn_js,fd)
 		fd.close()
