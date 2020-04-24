@@ -53,7 +53,18 @@ def printArray(smtobj, prefix, sz):
 	assert sz_in == sz
 	_ = 2+2
 
-def translate(nn_js, samples):
+def defineMaxIsHere(smtobj, var, prefix, here):
+	""
+	sz = defineArray_d[prefix]
+	assert 0 <= here < sz
+	theMax = prefix+str(here)
+	b = ['and']
+	for i in range(sz):
+		if i == here: continue
+		b.append(['>=', theMax, prefix+str(i)])
+	smtobj.defineFun(var,[],'Bool', b)	
+
+def translate(nn_js, samples, results=None):
 	"""
 	
 	"""
@@ -123,21 +134,46 @@ def translate(nn_js, samples):
 		#assert nxt_b_i == len(buf_l)
 		assert nxt_w_i == len(weights)
 		p_l.append(neurons)
+		if results:
+			var = 'pred_is_ok_'+str(s_i)
+			defineMaxIsHere(smtobj, var, prefix+'n{}_'.format(nxt_n_i), results[s_i])
+			smtobj.Assert(var)
 	r = np.array(p_l)
 	print(r)
+	
 	smtobj.checkSat()
 	smtobj.getValue([prefix+'n{}_{}'.format(nxt_n_i,i) for i in range(len(neurons))])
 	return smtobj
 
 if __name__ == "__main__":
-	fd = open('2_layer_mlp.json', encoding='utf8')
+	name = '2_layer_mlp'
+	fd = open(name+'.json', encoding='utf8')
 	nn_js = json.load(fd)
 	fd.close()
+	fd = open(name+'_test.json', encoding='utf8')
+	predictions = json.load(fd)
+	fd.close()
+	
+	"""
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+digits (InputLayer)          [(None, 784)]             0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 64)                50240      (64*785) RELU
+_________________________________________________________________
+predictions (Dense)          (None, 10)                650        (10*65)
+=================================================================
+Total params: 50,890
+Trainable params: 50,890
+Non-trainable params: 0
+_________________________________________________________________
+	"""
 	try: x_train0
 	except NameError:
 		npz = np.load('mnist.npz')
 		x_train0, y_train, x_test0, y_test = (npz[s] for s in ('x_train', 'y_train', 'x_test', 'y_test'))
 		npz.close()
 		x_train, x_test = x_train0.astype('float32') / 255, x_test0.astype('float32') / 255
-	smtobj = translate(nn_js, x_train[:1])
+	smtobj = translate(nn_js, x_test[:1],y_test[:1])
 	smtobj.to_file(nn_js[0]['name'])
