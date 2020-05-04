@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 # pour plt.imshow(x_train[1])
 import functools, operator
 from tf_experiments import tf_softmax
-
+from nnjs import predict, approx
 prod = lambda l: functools.reduce(operator.mul,l,1)
 assert prod(range(1,4)) == 6
 
@@ -34,7 +34,7 @@ def activation_relu(neurons):
 	""
 	pass
 
-def predict(nn_js, samples):
+def INH_predict(nn_js, samples):
 	""
 	configuration, weights = nn_js
 	# compil
@@ -106,7 +106,7 @@ def predict(nn_js, samples):
 	r = np.array(p_l)
 	return r
 
-def chk(model):
+def chk(model, write = False):
 	"""
 	"""
 	assert isinstance(model, tf.keras.Model)
@@ -207,17 +207,111 @@ at each update during training time, which helps prevent overfitting.
 	clean(configuration)
 	assert configuration == json.loads(json.dumps(configuration))
 	nn_js = [configuration, weights]
-	if True:
+	if write:
 		fd = open(configuration['name']+'.json', 'w')
 		json.dump(nn_js,fd)
 		fd.close()
 	return nn_js
 
+dbg = True
+chk_determ = False
+N = 10000
+
+def mnist_small(sz):
+	# MNIST SMALL
+	#sz = 12
+	if True:
+		if True:
+			npz = np.load('mnist_small{}.npz'.format(sz))
+			x_train0, y_train, x_test0, y_test = (npz[s] for s in ('x_train', 'y_train', 'x_test', 'y_test'))
+			npz.close()
+		x_train, x_test = x_train0.astype('float32') / 255, x_test0.astype('float32') / 255
+	#################################
+	if True:
+		print('********** BEG model0 **********')
+		inputs = tf.keras.Input(shape=(sz*sz,), name='digits')
+		x = tf.keras.layers.Dense(64, activation='relu', name='dense_1')(inputs)
+		#x = layers.Dense(64, activation='relu', name='dense_2')(x)
+		outputs = tf.keras.layers.Dense(10, name='predictions')(x)
+		model = tf.keras.Model(inputs=inputs, outputs=outputs, name='2_layer_mlp_SMALL{}'.format(sz))
+		if dbg:
+			model.summary()
+		"""
+Model: "2_layer_mlp"
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+digits (InputLayer)          [(None, 196)]             0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 64)                12608     
+_________________________________________________________________
+predictions (Dense)          (None, 10)                650       
+=================================================================
+Total params: 13,258
+Trainable params: 13,258
+Non-trainable params: 0
+_________________________________________________________________
+		"""
+		model.compile(loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              optimizer=tf.keras.optimizers.RMSprop())
+		history = model.fit(x_train.reshape(60000, sz*sz), y_train,
+                    batch_size=64,
+                    epochs=10)
+		#print('\nhistory dict:', history.history)
+		"""
+Train on 60000 samples
+60000/60000 [==============================] - 4s 70us/sample - loss: 0.3486
+		"""
+		model0 = model
+		print('********** END model0 **********')
+	# conversion
+	nn_js = chk(model0)
+	nn_js_ap = approx(nn_js, 16384)
+	# verif sur train
+	print('verif sur train')
+	pred0 = model0.predict(x_train.reshape(60000, sz*sz))
+	estim0 = pred0.argmax(axis=1)
+	print('success : {}'.format(sum(estim0 == y_train)))
+	pred0_1 = predict(nn_js, x_train.reshape(60000, sz*sz))
+	estim0_1 = pred0_1.argmax(axis=1)
+	assert all(estim0 == estim0_1)
+	err = abs((pred0 - pred0_1) / (pred0 + pred0_1)).max().max()
+	print('err max : {}'.format(err))
+	pred0_2 = predict(nn_js_ap, x_train.reshape(60000, sz*sz))
+	estim0_2 = pred0_2.argmax(axis=1)
+	print('err nb approx : {}'.format(sum(estim0 != estim0_2)))
+	err = abs((pred0 - pred0_2) / (pred0 + pred0_2)).max().max()
+	print('err max approx : {}'.format(err))
+	# test
+	print('test')
+	pred0 = model0.predict(x_test.reshape(10000, sz*sz))
+	estim0 = pred0.argmax(axis=1)
+	print('success : {}'.format(sum(estim0 == y_test)))
+	pred0_1 = predict(nn_js, x_test.reshape(10000, sz*sz))
+	estim0_1 = pred0_1.argmax(axis=1)
+	assert all(estim0 == estim0_1)
+	err = abs((pred0 - pred0_1) / (pred0 + pred0_1)).max().max()
+	print('err max : {}'.format(err))
+	pred0_2 = predict(nn_js_ap, x_test.reshape(10000, sz*sz))
+	estim0_2 = pred0_2.argmax(axis=1)
+	print('err nb approx : {}'.format(sum(estim0 != estim0_2)))
+	err = abs((pred0 - pred0_2) / (pred0 + pred0_2)).max().max()
+	print('err max approx : {}'.format(err))
+	#
+	if True:
+		fn = nn_js[0]['name']+'_test.json'
+		print('writing '+fn)
+		fd = open(fn, 'w')
+		json.dump(pred0_1.tolist(),fd)
+		fd.close()
+
+
 if __name__ == "__main__":
-	dbg = True
-	chk_determ = False
-	N = 10
-	## MNIST
+	for sz in range(8,15):
+		mnist_small(sz)
+
+if False:
+	## MNIST 
 	try: x_train0
 	except NameError:
 		if False:
