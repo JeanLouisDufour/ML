@@ -1,8 +1,9 @@
 levels = 255  ## 1.0 == levels -> quantum = 1/levels
 levels = None # non quantifie
 
-import json, numpy as np
+import json, math, numpy as np
 from smtlib import smtlib
+from nnjs import max_arr
 #
 import functools, operator
 prod = lambda l: functools.reduce(operator.mul,l,1)
@@ -62,6 +63,41 @@ def defineArrayNoisyIf(smtobj, name, a):
 			smtobj.defineFun(name+str(i),[],'Real',e)
 	defineArray_d[name] = len(a)
 
+def BVu(i,n):
+	""
+	assert 0 <= i < (1<<n)
+	if not isinstance(i,int):
+		assert i == int(i)
+		i = int(i)
+	fmt = '0{}b'.format(n)
+	return '#b'+format(i,fmt)
+
+def BVs(i,n):
+	""
+	assert -(1<<(n-1)) <= i < (1<<(n-1))
+	if not isinstance(i,int):
+		assert i == int(i)
+		i = int(i)
+	fmt = '0{}b'.format(n)
+	if i >= 0:
+		return '#b'+format(i,fmt)
+	else:
+		return '#b'+format(i+(1<<n),fmt)
+
+def defineArrayNoisyXor(smtobj, name, a, bits):
+	""
+	if not isinstance(a,np.ndarray):
+		a = np.array(a)
+	sh = a.shape
+	assert len(sh) in (1,2)
+	if len(sh) == 2:
+		a = a.reshape((prod(sh),))
+	for i,ai in enumerate(a):
+		n = 'noise'+str(i)
+		e = ['bvxor', n, BVu(ai,bits)]
+		smtobj.defineFun(name+str(i),[],('_','BitVec',bits),e)
+	defineArray_d[name] = len(a)
+
 def defineArrayLinear(smtobj, prefix_out, prefix_in, A, B):
 	""
 	sz_in = defineArray_d[prefix_in]
@@ -77,6 +113,56 @@ def defineArrayLinear(smtobj, prefix_out, prefix_in, A, B):
 		se = ['+', (float2int(Bi) if levels else float(Bi))] + se
 		smtobj.defineFun(prefix_out+str(i),[],('Int' if levels else 'Real'),se)
 	defineArray_d[prefix_out] = len(B)
+
+def defineArrayLinearBV(smtobj, prefix_out, prefix_in, A, B, relu = False):
+	""
+	sz_in = defineArray_d[prefix_in]
+	sz_bits = int(math.ceil(math.log2(sz_in+1)))
+	#
+	bits_in = smtobj.BVsz(prefix_in+'0')
+	#
+	if not isinstance(A,np.ndarray):
+		A = np.array(A)
+	assert len(A.shape) == 2
+	assert A.shape[0] == sz_in
+	if not isinstance(B,np.ndarray):
+		B = np.array(B)
+	assert A.shape[1:] == B.shape
+	sz_out = len(B)
+	AB_max = max(max_arr(A),max_arr(B))
+	AB_bits = int(math.ceil(math.log2(AB_max+1)))
+	#
+	SZ = AB_bits+bits_in+sz_bits
+	for i,Bi in enumerate(B):
+		assert Bi == int(Bi)
+		se_plus = [ \
+			['bvmul', [['_','zero_extend',AB_bits+sz_bits], prefix_in+str(j)], BVu(Aji,SZ)] \
+			for j,Aji in enumerate(A[:,i]) if Aji > 0]
+		se_minus = [ \
+			['bvmul', [['_','zero_extend',AB_bits+sz_bits], prefix_in+str(j)], BVu(-Aji,SZ)] \
+			for j,Aji in enumerate(A[:,i]) if Aji < 0]
+		if Bi > 0:
+			se_plus.append(BVu(Bi,SZ))
+		elif Bi < 0:
+			se_minus.append(BVu(-Bi,SZ))
+		smtobj.defineFun(prefix_out+'_plus'+str(i),[],('_','BitVec',SZ), ['bvadd']+se_plus)
+		smtobj.defineFun(prefix_out+'_minus'+str(i),[],('_','BitVec',SZ), ['bvadd']+se_minus)
+	defineArray_d[prefix_out+'_plus'] = len(B)
+	defineArray_d[prefix_out+'_minus'] = len(B)
+	if relu:
+		for i in range(sz_out):
+			se = ['ite', \
+					 ['bvugt', prefix_out+'_plus'+str(i), prefix_out+'_minus'+str(i)], \
+					 ['bvsub', prefix_out+'_plus'+str(i), prefix_out+'_minus'+str(i)], \
+					 BVu(0,SZ)]
+			smtobj.defineFun(prefix_out+str(i),[],('_','BitVec',SZ), se)
+	else:
+		for i in range(sz_out):
+			se = ['bvsub', \
+					 [['_','zero_extend',1], prefix_out+'_plus'+str(i)], \
+					 [['_','zero_extend',1], prefix_out+'_minus'+str(i)] ]
+			smtobj.defineFun(prefix_out+str(i),[],('_','BitVec',SZ+1), se)
+	defineArray_d[prefix_out] = sz_out
 
 def defineArrayReLU(smtobj, prefix_out, prefix_in, sz):
 	""
@@ -127,6 +213,20 @@ def defineArgMax(smtobj, prefix_in):
 		else:
 			smtobj.defineFun(prefix_out+str(here),[['offset','Real']],'Bool', b)
 	defineArray_d[prefix_out] = sz
+	
+def defineArgMaxBV(smtobj, prefix_in):
+	""
+	sz = defineArray_d[prefix_in]
+	bits = smtobj.BVsz(prefix_in+'0')
+	prefix_out = prefix_in + '_ArgMax_is_'
+	for here in range(sz):
+		theMax = prefix_in+str(here)
+		b = ['and']
+		for i in range(sz):
+			if i == here: continue
+			b.append(['bvsge', theMax, ['bvadd',prefix_in+str(i),'offset']])
+		smtobj.defineFun(prefix_out+str(here),[['offset',('_','BitVec',bits)]],'Bool', b)
+	defineArray_d[prefix_out] = sz
 
 def defineNoise(smtobj, sz, i_max, s_max, nb_max=None):
 	""
@@ -163,6 +263,19 @@ def defineNoise(smtobj, sz, i_max, s_max, nb_max=None):
 	smtobj.Assert(['<=',prefix+'_nb',prefix+'_nb_max'])
 	defineArray_d[prefix] = sz
 
+def declareArrayBV(smtobj, prefix, sz, bits):
+	""
+	count_bits = int(math.ceil(math.log2(sz+1)))
+	count_0 = '#b' + '0'*count_bits
+	count_1 = '#b' + '0'*(count_bits-1) + '1'
+	nb = ['bvadd']
+	for i in range(sz):
+		name = prefix+str(i)
+		nb.append(['ite',['=',name,'#b'+'0'*bits],count_0,count_1])
+		smtobj.declareConst(name, ('_','BitVec',bits))
+	smtobj.defineFun(prefix+'_nb',[],('_','BitVec',count_bits), nb)
+	defineArray_d[prefix] = sz
+	
 def translate(nn_js, samples, results=None):
 	"""
 	
@@ -258,11 +371,96 @@ def translate(nn_js, samples, results=None):
 				  + ['noise'+str(i) for i in range(prod(samples.shape[1:]))])
 	return smtobj
 
+def translate_Q(nn_js, samples, results, bits):
+	"""
+	
+	"""
+	assert 2 <= bits <= 8
+	smtobj = smtlib('QF_BV')
+	smtobj.setOption(':produce-models','true')
+	# smtobj.float_mantissa = 64
+	configuration, weights = nn_js
+	# compil
+	declareArrayBV(smtobj, 'noise', prod(samples.shape[1:]), bits)
+	#
+	p_l = []
+	assert len(samples) == 1
+	for s_i, sample in enumerate(samples):
+		prefix = 's'+str(s_i)
+		neurons = sample >> (8-bits) # 3
+		defineArrayNoisyXor(smtobj, prefix+'n0_', neurons, bits)
+		curr_bits = bits
+		nxt_n_i = 0
+		nxt_w_i = 0
+		for l_i, conf_layer in enumerate(configuration['layers']):
+			assert isinstance(neurons, np.ndarray) # and len(neurons.shape) == 1
+			kind = conf_layer['class_name']
+			config = conf_layer['config']
+			if kind == 'Dense':
+				w1_,w2_ = weights[nxt_w_i:nxt_w_i+2]
+				w1 = np.array(w1_, np.float32); w2 = np.array(w2_, np.float32); 
+				nxt_w_i += 2
+				sh1 = w1.shape; sh2 = w2.shape;
+				assert sh1[-1:] == sh2
+				assert neurons.shape == sh1[:len(neurons.shape)]
+				activ = config['activation']
+				neurons1a = np.matmul(neurons,w1) + w2
+				defineArrayLinearBV(smtobj, \
+					  prefix+'n{}_'.format(nxt_n_i+1), \
+					  prefix+'n{}_'.format(nxt_n_i), \
+					  w1, w2, \
+					  relu = activ == 'relu')
+				nxt_n_i += 1
+				if activ == 'relu':
+					neurons1a = np.fromiter(((0 if x < 0 else x) for x in neurons1a), np.float32)
+				elif activ == 'softmax':
+					neurons1a = np.exp(neurons1a)
+					# neurons1a *= (np.float32(1)/ np.sum(neurons1a))
+					neurons1a *= (np.float64(1)/ np.sum(neurons1a.astype(np.float64)))
+				else:
+					assert activ == 'linear'
+				neurons = neurons1a
+			elif kind == 'Dropout':
+				_ = 2+2
+			elif kind == 'Flatten':
+				assert l_i == 0
+				d1,d2 = neurons.shape
+				neurons = neurons.reshape((d1*d2,))
+			elif kind == 'InputLayer':
+				assert l_i == 0
+				sh = config['batch_input_shape']
+				assert prod(neurons.shape) == prod(sh[1:])
+				if len(neurons.shape) >= 2:
+					d1,d2 = neurons.shape
+					neurons = neurons.reshape((d1*d2,))
+			else:
+				assert False, kind
+			assert isinstance(neurons, np.ndarray) and len(neurons.shape) == 1
+		#assert nxt_b_i == len(buf_l)
+		assert nxt_w_i == len(weights)
+		p_l.append(neurons)
+		defineArgMaxBV(smtobj, prefix+'n{}_'.format(nxt_n_i))
+		if results is not None:
+			#var = 'pred_is_ok_'+str(s_i)
+			#defineMaxIsHere(smtobj, var, prefix+'n{}_'.format(nxt_n_i), results[s_i])
+			#smtobj.Assert(var)
+			var = prefix+'n{}_'.format(nxt_n_i)
+			smtobj.Assert([var+'_ArgMax_is_'+str(results[s_i]), BVu(0,smtobj.BVsz(var+'0'))])
+	r = np.array(p_l)
+	print(r)
+	
+	smtobj.checkSat()
+	smtobj.getValue([prefix+'n{}_{}'.format(nxt_n_i,i) for i in range(len(neurons))] \
+				  + ['noise_nb'] \
+				  + ['noise'+str(i) for i in range(prod(samples.shape[1:]))])
+	return smtobj
+
 if __name__ == "__main__":
-	sz = 14
-	name = '2_layer_mlp_SMALL{}'.format(sz)
-	# name = '2_layer_mlp_SMALL{}_1000'.format(sz)
-	datafile = 'mnist_small{}.npz'.format(sz)
+	sz = 12
+	levels = 5
+	name = '2_layer_mlp_SMALL{}'.format(sz) if sz else '2_layer_mlp'
+	if levels: name += '_Q{}'.format(levels)
+	datafile = 'mnist_small{}.npz'.format(sz) if sz else 'mnist.npz'
 	#
 	fd = open(name+'.json', encoding='utf8')
 	nn_js = json.load(fd)
@@ -298,6 +496,6 @@ _________________________________________________________________
 		npz.close()
 		x_train, x_test = x_train0.astype('float32') / 255, x_test0.astype('float32') / 255
 	i = 3 # 0
-	smtobj = translate(nn_js, x_test[i:i+1],y_test[i:i+1])
-	#smtobj.to_file(nn_js[0]['name'] + ('_INT' if levels else ''))
+	# smtobj = translate(nn_js, x_test[i:i+1],y_test[i:i+1])
+	smtobj = translate_Q(nn_js, x_test0[i:i+1],y_test[i:i+1], levels)
 	smtobj.to_file(name)

@@ -49,7 +49,7 @@ def predict(nn_js, samples, out=None):
 			d1,d2 = sh
 			assert False
 		elif kind == 'InputLayer':
-			assert conf_layer['config']['batch_input_shape'] == [None] + list(sh)
+			assert conf_layer['config']['batch_input_shape'] == [None] + list(sh), conf_layer['config']
 			assert conf_layer['config']['dtype'] == 'float32'
 		else:
 			assert False, kind
@@ -161,11 +161,12 @@ def quant(nn_js, levels, max_denom=None):
 	configuration, weights = nn_js
 	return configuration, [quant_wx(wx, levels) for wx in weights]
 
+def max_arr(a):
+	""
+	return max(abs(a.min()),abs(a.max()))
+
 def normalize(nn_js, levels=None):
 	""
-	def max_arr(a):
-		""
-		return max(abs(a.min()),abs(a.max()))
 	def round_arr(a, levels):
 		""
 		return np.floor(a*levels+0.5)
@@ -182,36 +183,39 @@ def normalize(nn_js, levels=None):
 		npw = [round_arr(a,levels) for a in npw]
 	return conf, [w.tolist() for w in npw]
 
+x_train0, y_train, x_test0, y_test = [None]*4
+
+def perfo(nn_js):
+	""
+	sz = x_train0.shape[1]
+	pred = predict(nn_js, x_train0.reshape(60000, sz*sz).astype('float32'))
+	estim = pred.argmax(axis=1)
+	print('errs : {}'.format(sum(estim != y_train)))
+	#
+	pred = predict(nn_js, x_test0.reshape(10000, sz*sz).astype('float32'))
+	estim = pred.argmax(axis=1)
+	print('errs : {}'.format(sum(estim != y_test)))
+
 if __name__ == "__main__":
 	sz = 12
-	name = '2_layer_mlp_SMALL{}'.format(sz)
-	#name = '2_layer_mlp'	#
+	levels = 5
+	name = '2_layer_mlp_SMALL{}'.format(sz) if sz else '2_layer_mlp'
 	fd = open(name+'.json', encoding='utf8')
 	nn_js = json.load(fd)
 	fd.close()
 	#
-	datafile = 'mnist_small{}.npz'.format(sz)
+	datafile = 'mnist_small{}.npz'.format(sz) if sz else 'mnist.npz'
 	npz = np.load(datafile)
 	x_train0, y_train, x_test0, y_test = (npz[s] for s in ('x_train', 'y_train', 'x_test', 'y_test'))
 	npz.close()
-	x_train, x_test = x_train0.astype('float32') / 255, x_test0.astype('float32') / 255
+	#x_train, x_test = x_train0.astype('float32') / 255, x_test0.astype('float32') / 255
 	#
-	nn_js_n = normalize(nn_js, 128)
+	perfo(nn_js)
+	x_train0 >>= 3
+	x_test0 >>= 3
+	nn_js_n = normalize(nn_js, (1<<levels)-0.51) # 7.49 optimal pour full,  31.49 pour small12 et small14 
+	perfo(nn_js_n)
 	#
-	pred = predict(nn_js_n, x_train0.reshape(60000, sz*sz).astype('float32'))
-	estim = pred.argmax(axis=1)
-	print('errs : {}'.format(sum(estim != y_train)))
-	#
-	pred = predict(nn_js_n, x_test0.reshape(10000, sz*sz).astype('float32'))
-	estim = pred.argmax(axis=1)
-	print('errs : {}'.format(sum(estim != y_test)))
-	#
-#	fd = open(name+'_test.json', encoding='utf8')
-#	predictions = json.load(fd)
-#	fd.close()
-#	levels = 1000 # environ np.float16
-#	nn_js_ap = approx(nn_js, levels)
-#	2+2
-#	fd = open('{}_{}.json'.format(name,levels), 'w')
-#	json.dump(nn_js_ap,fd)
-#	fd.close()
+	fd = open('{}_Q{}.json'.format(name,levels), 'w')
+	json.dump(nn_js_n,fd)
+	fd.close()
