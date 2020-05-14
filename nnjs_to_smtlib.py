@@ -131,15 +131,22 @@ def defineArrayLinearBV(smtobj, prefix_out, prefix_in, A, B, relu = False):
 	sz_out = len(B)
 	AB_max = max(max_arr(A),max_arr(B))
 	AB_bits = int(math.ceil(math.log2(AB_max+1)))
+	n_max = 0
+	for i,Bi in enumerate(B):
+		n = max(sum(a for a in A[:,i] if a > 0), -sum(a for a in A[:,i] if a < 0))
+		n_max = max(n,n_max)
+	n_max_bits = int(math.ceil(math.log2(n_max+1)))
 	#
-	SZ = AB_bits+bits_in+sz_bits
+	SZ_old = AB_bits+bits_in+sz_bits
+	SZ = bits_in + n_max_bits
+	print('gain sur SZ : {} -> {}'.format(SZ_old-SZ, SZ))
 	for i,Bi in enumerate(B):
 		assert Bi == int(Bi)
 		se_plus = [ \
-			['bvmul', [['_','zero_extend',AB_bits+sz_bits], prefix_in+str(j)], BVu(Aji,SZ)] \
+			['bvmul', [['_','zero_extend',SZ-bits_in], prefix_in+str(j)], BVu(Aji,SZ)] \
 			for j,Aji in enumerate(A[:,i]) if Aji > 0]
 		se_minus = [ \
-			['bvmul', [['_','zero_extend',AB_bits+sz_bits], prefix_in+str(j)], BVu(-Aji,SZ)] \
+			['bvmul', [['_','zero_extend',SZ-bits_in], prefix_in+str(j)], BVu(-Aji,SZ)] \
 			for j,Aji in enumerate(A[:,i]) if Aji < 0]
 		if Bi > 0:
 			se_plus.append(BVu(Bi,SZ))
@@ -498,4 +505,5 @@ _________________________________________________________________
 	i = 3 # 0
 	# smtobj = translate(nn_js, x_test[i:i+1],y_test[i:i+1])
 	smtobj = translate_Q(nn_js, x_test0[i:i+1],y_test[i:i+1], levels)
-	smtobj.to_file(name)
+	if True:
+		smtobj.to_file(name)
