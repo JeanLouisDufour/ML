@@ -45,7 +45,7 @@ def NMSBoxes(boxes, confidences, min_confidence, NMS_threshold):
 
 #######################################################
 
-def ReadDarknetFromCfg(cfg_fn):
+def ReadDarknetFromCfg(cfg_fn, CV_450 = False):
 	"""
 	"""
 	def parse(s):
@@ -94,14 +94,18 @@ def ReadDarknetFromCfg(cfg_fn):
 	net['width'] = net_cfg.get('width',416)
 	net['height'] = net_cfg.get('height',416)
 	net['channels'] = net_cfg.get('channels',3)
+	assert  all(net[x] > 0 for x in (('width','height','channels')))
+	#####
+	# avant CV_450, seul existe tensor_shape[0] sous le nom current_channels
+	#####
 	tensor_shape = [net['channels'], net['width'], net['height']]
-	assert  all(x > 0 for x in tensor_shape)
 	net['out_channels_vec'] = out_channels_vec = [None] * len(layers_cfg)
 	net['layers'] = layers = [] # darknet::LayerParameter list
 	
+	kFirstLayerName = "data"
 	# class setLayersParams
 	layer_id = 0
-	last_layer = "data"
+	last_layer = kFirstLayerName
 	fused_layer_names = []
 	# chaque darknet layer pointe vers un dnn layer
 	for layers_counter, lcfg in enumerate(layers_cfg):
@@ -109,23 +113,31 @@ def ReadDarknetFromCfg(cfg_fn):
 		if lt == "convolutional":
 			kernel_size = lcfg.get('size', -1)
 			pad = lcfg.get('pad',0)
-			padding = lcfg.get('padding', 0)
 			stride = lcfg.get('stride', 1)
 			filters = lcfg.get('filters',-1)
-			groups = lcfg.get('groups', 1)
 			batch_normalize = lcfg.get('batch_normalize',0) == 1
 			flipped = lcfg.get('flipped', 0)
 			assert flipped==0, "Transpose the convolutional weights is not implemented"
-			if pad:
-				padding = kernel_size/2
 			assert stride > 0 and kernel_size > 0 and filters > 0
-			assert tensor_shape[0] > 0 and tensor_shape[0] % groups == 0
-			# setParams.setConvolution(kernel_size, padding, stride, filters, tensor_shape[0], groups, batch_normalize);
+			assert tensor_shape[0] > 0
+			if CV_450:
+				padding = lcfg.get('padding', 0)
+				if pad:
+					padding = kernel_size/2
+				groups = lcfg.get('groups', 1)
+				assert tensor_shape[0] % groups == 0
+			else:
+				activation = lcfg.get("activation", "linear")
+				assert activation in ("linear","leaky"), "Unsupported activation: " + activation
+				if kernel_size < 3:
+					pad = 0
+			# CV_450: setParams.setConvolution(kernel_size, padding, stride, filters, tensor_shape[0], groups, batch_normalize);
+			# CV_401:             ...                       pad            ...           activation == "leaky"
 			dnn_lp = {
 				"name": "Convolution-name",
 				"type" : "Convolution",
 				"kernel_size": kernel_size,
-				"pad": padding,
+				"pad": padding if CV_450 else pad,
 				"stride": stride,
 				"bias_term": False,
 				"num_output": filters }
@@ -155,12 +167,26 @@ def ReadDarknetFromCfg(cfg_fn):
 					"bottom_indexes": [last_layer] }
 				last_layer = layer_name
 				layers.append(dark_lp)
+			if (not CV_450) and activation == "leaky":
+				dnn_lp = {
+					"name": "ReLU-name",
+					"type" : "ReLU",
+					"negative_slope": 0.1}
+				layer_name = f"relu_{layer_id}"
+				dark_lp = {
+					"layer_name": layer_name,
+					"layer_type": dnn_lp["type"],
+					"layerParams": dnn_lp,
+					"bottom_indexes": [last_layer] }
+				last_layer = layer_name
+				layers.append(dark_lp)
 			layer_id += 1
 			fused_layer_names.append(last_layer)
 			# end setConvolution
 			tensor_shape[0] = filters
-			tensor_shape[1] = (tensor_shape[1] - kernel_size + 2 * padding) / stride + 1
-			tensor_shape[2] = (tensor_shape[2] - kernel_size + 2 * padding) / stride + 1
+			if CV_450:
+				tensor_shape[1] = (tensor_shape[1] - kernel_size + 2 * padding) / stride + 1
+				tensor_shape[2] = (tensor_shape[2] - kernel_size + 2 * padding) / stride + 1
 		elif lt == "connected":
 			assert False
 		elif lt == "maxpool":
@@ -170,7 +196,49 @@ def ReadDarknetFromCfg(cfg_fn):
 		elif lt == "softmax":
 			assert False
 		elif lt == "route":
-			assert False
+			layers_vec = lcfg["layers"]
+			if not isinstance(layers_vec, list):
+				layers_vec = [layers_vec]
+			if CV_450:
+				groups = lcfg.get("groups", 1)
+			tensor_shape[0] = 0
+			for k,l in enumerate(layers_vec):
+				layers_vec[k] = l if l >= 0 else (l + layers_counter) # CV_401 : > au lieu de >=
+				tensor_shape[0] += out_channels_vec[layers_vec[k]]
+			if CV_450 and groups > 1:
+				assert False
+			else:
+				if len(layers_vec) == 1:
+					# setParams.setIdentity(layers_vec.at(0));
+					dnn_lp = {
+						"name": "Identity-name",
+						"type" : "Identity" }
+					layer_name = f"identity_{layer_id}"
+					dark_lp = {
+						"layer_name": layer_name,
+						"layer_type": dnn_lp["type"],
+						"layerParams": dnn_lp,
+						"bottom_indexes": [fused_layer_names[layers_vec[0]]] }
+					last_layer = layer_name
+					layers.append(dark_lp)
+					layer_id += 1
+					fused_layer_names.append(last_layer)
+				else:
+					# setParams.setConcat(layers_vec.size(), layers_vec.data());
+					dnn_lp = {
+						"name": "Concat-name",
+						"type" : "Concat",
+						"axis": 1 }
+					layer_name = f"concat_{layer_id}"
+					dark_lp = {
+						"layer_name": layer_name,
+						"layer_type": dnn_lp["type"],
+						"layerParams": dnn_lp,
+						"bottom_indexes": [fused_layer_names[l] for l in layers_vec] }
+					last_layer = layer_name
+					layers.append(dark_lp)
+					layer_id += 1
+					fused_layer_names.append(last_layer)
 		elif lt in ("dropout", "cost"):
 			assert False
 		elif lt == "reorg":
@@ -179,24 +247,31 @@ def ReadDarknetFromCfg(cfg_fn):
 			assert False
 		elif lt == "shortcut":
 			from_ = lcfg["from"]
-			alpha = lcfg.get("alpha", 1)
-			beta = lcfg.get("beta", 0)
-			assert beta == 0, "Non-zero beta"
+			if CV_450:
+				alpha = lcfg.get("alpha", 1)
+				beta = lcfg.get("beta", 0)
+				assert beta == 0, "Non-zero beta"
+			else:
+				assert from_ < 0
 			from_ = from_ + layers_counter if from_ < 0 else from_
+			if not CV_450:
+				tensor_shape[0] = out_channels_vec[from_]
 			# setParams.setShortcut(from, alpha);
 			dnn_lp = {
 				'name': "Shortcut-name",
 				'type': "Eltwise",
-				"op": "sum",
-				 "output_channels_mode": "input_0_truncate" }
-			if alpha != 1:
-				assert False
+				"op": "sum" }
+			if CV_450:
+				dnn_lp["output_channels_mode"] = "input_0_truncate"
+				if alpha != 1:
+					assert False
 			layer_name = f"shortcut_{layer_id}"
 			dark_lp = {
 				'layer_name': layer_name,
 				'layer_type': dnn_lp['type'],
 				'layerParams': dnn_lp,
-				"bottom_indexes": [last_layer, fused_layer_names[from_]] }
+				"bottom_indexes": [last_layer, fused_layer_names[from_]] if CV_450 \
+							else  [fused_layer_names[from_], last_layer] }
 			last_layer = layer_name
 			layers.append(dark_lp)
 			layer_id += 1
@@ -205,25 +280,111 @@ def ReadDarknetFromCfg(cfg_fn):
 		elif lt == "scale_channels":
 			assert False
 		elif lt == "upsample":
-			assert False
+			scaleFactor = lcfg.get("stride", 1)
+			# setParams.setUpsample(scaleFactor);
+			dnn_lp = {
+				'name': "Upsample-name",
+				'type': "Resize",
+				"zoom_factor": scaleFactor,
+				"interpolation": "nearest" }
+			layer_name = f"upsample_{layer_id}"
+			dark_lp = {
+				'layer_name': layer_name,
+				'layer_type': dnn_lp['type'],
+				'layerParams': dnn_lp,
+				"bottom_indexes": [last_layer] }
+			last_layer = layer_name
+			layers.append(dark_lp)
+			layer_id += 1
+			fused_layer_names.append(last_layer)
+			# end setUp...
+			if CV_450:
+				tensor_shape[1] *= scaleFactor
+				tensor_shape[2] *= scaleFactor
 		elif lt == "yolo":
 			classes = lcfg.get("classes", -1)
 			num_of_anchors = lcfg.get("num", -1)
-			thresh = lcfg.get("thresh", 0.2)
-			nms_threshold = lcfg.get("nms_threshold", 0.0)
-			scale_x_y = lcfg.get("scale_x_y", 1.0)
+			if CV_450:
+				thresh = lcfg.get("thresh", 0.2)
+				nms_threshold = lcfg.get("nms_threshold", 0.0)
+				scale_x_y = lcfg.get("scale_x_y", 1.0)
 			anchors_vec = lcfg["anchors"]
 			mask_vec = lcfg["mask"]
 			assert classes > 0 and num_of_anchors > 0 and (num_of_anchors * 2) == len(anchors_vec)
 			# setParams.setPermute(false);
-			pass
+			dnn_lp = {
+				'name': "Permute-name",
+				'type': "Permute",
+				"order": [0, 2, 3, 1] }
+			layer_name = f"permute_{layer_id}"
+			dark_lp = {
+				'layer_name': layer_name,
+				'layer_type': dnn_lp['type'],
+				'layerParams': dnn_lp,
+				"bottom_indexes": [last_layer] }
+			last_layer = layer_name
+			layers.append(dark_lp)
+			if False:
+				layer_id += 1
+				fused_layer_names.append(last_layer)
 			# setParams.setYolo(classes, mask_vec, anchors_vec, thresh, nms_threshold, scale_x_y);
-			pass
+			numAnchors = len(mask_vec)
+			usedAnchors = []
+			for m in mask_vec:
+				usedAnchors.extend(anchors[m*2:m*2+2])
+			dnn_lp = {
+				'name': "Region-name",
+				'type': "Region",
+				"classes": classes,
+				"anchors": numAnchors,
+				"logistic": True,
+				"blobs": [usedAnchors] }
+			if CV_450:
+				dnn_lp.update({
+				"thresh": thresh,
+				"nms_threshold": nms_threshold,
+				"scale_x_y": scale_x_y })
+			layer_name = f"yolo_{layer_id}"
+			dark_lp = {
+				'layer_name': layer_name,
+				'layer_type': dnn_lp['type'],
+				'layerParams': dnn_lp,
+				"bottom_indexes": [last_layer, kFirstLayerName] }
+			last_layer = layer_name
+			layers.append(dark_lp)
+			layer_id += 1
+			fused_layer_names.append(last_layer)
 		else:
 			assert False, "Unknown layer type: "+lt
-		activation = lcfg.get("activation", "linear")
-		if activation != "linear":
-			pass
+		if CV_450:
+			activation = lcfg.get("activation", "linear")
+			if activation != "linear":
+				# setParams.setActivation(activation);
+				dnn_lp = {}
+				if activation == "relu":
+					dnn_lp["type"] = "ReLU"
+				elif activation == "leaky":
+					dnn_lp["negative_slope"] = 0.1
+					dnn_lp["type"] = "ReLU"
+				elif activation == "swish":
+					dnn_lp["type"] = "Swish"
+				elif activation == "mish":
+					dnn_lp["type"] = "Mish"
+				elif activation == "logistic":
+					dnn_lp["type"] = "Sigmoid"
+				else:
+					assert False, "Unsupported activation: " + activation
+				layer_name = f"{activation}_{layer_id}"
+				dark_lp = {
+					'layer_name': layer_name,
+					'layer_type': dnn_lp['type'],
+					'layerParams': dnn_lp,
+					"bottom_indexes": [last_layer] }
+				last_layer = layer_name
+				layers.append(dark_lp)
+				fused_layer_names[-1] = last_layer
+			# end setActivation
+		out_channels_vec[layers_counter] = tensor_shape[0]
 		
 	return net
 	
@@ -243,7 +404,7 @@ layer_d = { # fils de Layer, sauf precision ; cf all_layers.hpp
 'Resize': None,
 }
 
-def analyze(net):
+def analyze(net, inputShape):
 	"""
 dnn_Net methods:
 connect
@@ -280,13 +441,14 @@ name
 preferableTarget
 type
 	"""
-	s = set()
+	ll = []
+	#s = set()
 	l_input = net.getLayer(0)
 	assert  l_input.name == '_input' \
 		and net.getLayerId('_input') == 0 \
 		and l_input.type == '' \
 		and l_input.blobs == []
-	layers_ids, in_shapes, out_shapes = net.getLayersShapes([1, 3, 416, 416])
+	layers_ids, in_shapes, out_shapes = net.getLayersShapes(inputShape)
 	lnl = ['_input'] + net.getLayerNames()
 	assert len(layers_ids) == len(in_shapes) == len(out_shapes) == len(lnl)
 	assert all(layers_ids[:,0] == range(len(lnl)))
@@ -304,8 +466,10 @@ type
 		out_s = out_shapes[li]
 		assert isinstance(out_s, list) and all(sh.shape in [(4,1),(2,1)] for sh in out_s), out_s
 		assert len(out_s) == 1, (lt, out_s)
-		print(li, ln, lt, [b.ndim for b in bl], [x.flatten().tolist() for x in in_s], [x.flatten().tolist() for x in out_s])
-	_ = 2+2
+		summary = [ln, lt, [b.ndim for b in bl], [x.flatten().tolist() for x in in_s], [x.flatten().tolist() for x in out_s]]
+		print(li, summary)
+		ll.append(summary)
+	return ll
 	
 if __name__ == "__main__":
-	ReadDarknetFromCfg('yolov3.cfg')
+	net = ReadDarknetFromCfg('yolov3.cfg')

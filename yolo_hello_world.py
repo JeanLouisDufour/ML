@@ -24,8 +24,16 @@ np.random.seed(42)
 COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
 
 net = cv.dnn.readNetFromDarknet(y_cfg, y_weights)
-my_cv_dnn.ReadDarknetFromCfg(y_cfg)
-my_cv_dnn.analyze(net)
+if True:
+	net1 = my_cv_dnn.ReadDarknetFromCfg(y_cfg)
+	layers = my_cv_dnn.analyze(net, [1, 3, 416, 416])
+	l1 = [d["layer_name"] for d in net1["layers"]]
+	l2 = [l[0] for l in layers]
+	assert l1 == l2[1:]
+	t1 = [d["layer_type"] for d in net1["layers"]]
+	t2 = [l[1] for l in layers]
+	assert t1 == t2[1:]
+	_ = 2+2
 
 image = cv.imread(image)
 print(image.shape, image.dtype)
