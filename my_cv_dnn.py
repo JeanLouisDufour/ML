@@ -1,6 +1,6 @@
 import numpy as np, cv2 as cv
 
-def blobFromImage(image, scalefactor=1.0, size=None, mean=None, swapRB=False, crop=False, ddepth=cv.CV_32F):
+def blobFromImage(image, scalefactor=1.0, size_WH=None, mean=None, swapRB=False, crop=False, ddepth=cv.CV_32F):
 	"""
 	WARNING : image est modifie
 	size_ et mean_ : par ref
@@ -10,16 +10,19 @@ def blobFromImage(image, scalefactor=1.0, size=None, mean=None, swapRB=False, cr
 	assert ddepth in (cv.CV_32F, cv.CV_8U)
 	if ddepth == cv.CV_8U:
 		assert scalefactor==1.0 and mean is None
-	imgSize = image.shape[:2]
-	if size is None:
-		size = imgSize
+	src_HW = image.shape[:2]
+	if size_WH is None:
+		size_HW = src_HW
+		size_WH = tuple(reversed(size_HW))
 	else:
-		assert len(size) == 2
-	if size != imgSize:
+		assert len(size_WH) == 2
+		size_HW = tuple(reversed(size_WH))
+	if size_HW != src_HW:
 		if crop:
 			assert False
 		else:
-			image_1 = cv.resize(image, size, fx=0, fy=0, interpolation = cv.INTER_LINEAR) # dst=image
+			image_1 = cv.resize(image, size_WH, fx=0, fy=0, interpolation = cv.INTER_LINEAR) # dst=image
+			assert image_1.shape == size_HW + (3,)
 	else:
 		image_1 = image
 	if image.dtype == np.uint8 and ddepth == cv.CV_32F:
@@ -31,7 +34,7 @@ def blobFromImage(image, scalefactor=1.0, size=None, mean=None, swapRB=False, cr
 	mean = np.float32([0,0,0])
 	image_2 -= mean
 	image_2 *= np.float32(scalefactor)
-	blob = np.empty((1,3) + size, dtype = np.float32)
+	blob = np.empty((1,3) + size_HW, dtype = np.float32)
 	for ch in range(3):
 		blob[0,ch,:,:] = image_2[:,:,(2-ch if swapRB else ch)]
 	return blob
@@ -391,16 +394,108 @@ def ReadDarknetFromCfg(cfg_fn, CV_450 = False):
 
 #######################################################
 
+def BatchNorm_shapes(bsh_l, ish_l, osh_l):
+	""
+	assert len(bsh_l) == 4, bsh_l
+	assert ish_l == osh_l
+	assert all(bsh==(1, ish_l[0][1]) for bsh in bsh_l)
+
+def Concat_shapes(bsh_l, ish_l, osh_l):
+	""
+	assert bsh_l == []
+	i1,i2 = ish_l
+	[o] = osh_l
+	assert i1[2:] == i2[2:] == o[2:]
+	assert i1[1]+i2[1] == o[1]
+
+def Convolution_shapes(bsh_l, ish_l, osh_l, stride=1):
+	""
+	assert len(bsh_l) in (1,2)
+	bsh = bsh_l[0]
+	assert bsh[2] == bsh[3]
+	assert bsh[2] in (1,3), bsh[2]
+	if len(bsh_l) == 2:
+		# blobs  : [(255, 256, 1, 1), (1, 255)]
+		assert bsh_l[1] == (1, bsh[0])
+	[ish] = ish_l
+	assert ish[1] == bsh[1]
+	[osh] = osh_l
+	assert osh[0] == ish[0] ==1
+	assert osh[1] == bsh[0]
+	assert osh[2:] in ( ish[2:], (ish[2]/2, ish[3]/2) ), (ish, osh)
+	#print('Convolution_shapes')
+
+def Convolution_k1(b,bias,inp,o):
+	""
+	bs = b.shape
+	os = o.shape
+	plan = np.empty(os[2:], dtype=o.dtype)
+	for i in range(bs[0]):
+		plan[:,:] = 0 if bias is None else bias[0,i]
+		for j in range(bs[1]):
+			plan += b[i,j,0,0] * inp[0,j,:,:]
+		o[0,i,:,:] = plan
+
+def Convolution_k3(b,bias,inp,o):
+	""
+	print("not implemented")
+
+def Convolution_forward(bl,il, stride=1):
+	"""
+7 conv_2 Convolution
+	blobs  : [(32, 64, 1, 1)]
+	inputs : [[1, 64, 208, 208]]
+	output : [1, 32, 208, 208]
+	
+	[b7] = net.getLayer('conv_2').blobs
+	xx = Convolution_forward([b7],[y6])
+	np.max(np.abs(xx.flatten()-y7.flatten())) -> 3.8146973e-06
+	
+252 conv_105 Convolution
+	blobs  : [(255, 256, 1, 1), (1, 255)]
+	inputs : [[1, 256, 52, 52]]
+	output : [1, 255, 52, 52]
+	
+	[b252] = net.getLayer('conv_105').blobs pour bias
+	"""
+	b = bl[0]
+	bs = b.shape
+	if len(b)==2:
+		bias = bl[1]
+		assert bias.shape == (1, bs[0])
+	else:
+		bias = None
+	[inp] = il
+	inps = inp.shape
+	assert bs[1] == inps[1] and inps[0] == 1
+	os = (1, bs[0]) + inps[2:]
+	o = np.empty(os, dtype = inp.dtype)
+	if bs[2:] == (1,1):
+		Convolution_k1(b,bias,inp,o)
+	elif bs[2:] == (3,3):
+		Convolution_k3(b,bias,inp,o)
+	else:
+		assert False, "kernel size not implemented"
+	return o	
+
+def ReLU_shapes(bsh_l, ish_l, osh_l):
+	""
+	assert bsh_l == []
+	[ish] = ish_l
+	[osh] = osh_l
+	assert ish == osh
+	
+
 layer_d = { # fils de Layer, sauf precision ; cf all_layers.hpp
 '': None,
-'BatchNorm': None, # Activation
-'Concat': None,
-'Convolution': None, # BaseConvolution
+'BatchNorm': [BatchNorm_shapes], # Activation
+'Concat': [Concat_shapes],
+'Convolution': [Convolution_shapes], # BaseConvolution
 'Eltwise': None,
 'Identity': None, # ?
 'Permute': None,
 'Region': None,
-'ReLU': None,   # Activation
+'ReLU': [ReLU_shapes],   # Activation
 'Resize': None,
 }
 
@@ -441,6 +536,8 @@ name
 preferableTarget
 type
 	"""
+	sl = []
+	sbig = ''
 	ll = []
 	#s = set()
 	l_input = net.getLayer(0)
@@ -457,7 +554,7 @@ type
 		layer = net.getLayer(li)
 		assert layer.name == ln
 		lt = layer.type
-		assert lt in layer_d, lt
+		lt_methods = layer_d[lt]
 		bl = layer.blobs
 		assert isinstance(bl, list)
 		in_s = in_shapes[li]
@@ -466,9 +563,22 @@ type
 		out_s = out_shapes[li]
 		assert isinstance(out_s, list) and all(sh.shape in [(4,1),(2,1)] for sh in out_s), out_s
 		assert len(out_s) == 1, (lt, out_s)
-		summary = [ln, lt, [b.ndim for b in bl], [x.flatten().tolist() for x in in_s], [x.flatten().tolist() for x in out_s]]
-		print(li, summary)
+		bsh_l = [b.shape for b in bl]
+		ish_l = [tuple(x.flatten().tolist()) for x in in_s]
+		osh_l = [tuple(x.flatten().tolist()) for x in out_s]
+		if lt_methods:
+			lt_methods[0](bsh_l, ish_l, osh_l)
+		#
+		summary = [ln, lt, bsh_l, ish_l, osh_l]
+		txt = f'{li} {ln} {lt}\n\tblobs  : {summary[2]}\n\tinputs : {summary[3]}\n\toutput : {summary[4][0]}\n'
+		print(txt)
+		#print(li, ln, lt)
+		#print('\tblobs  : ', summary[2])
+		#print('\tinputs : ', summary[3])
+		#print('\toutput : ', summary[4][0])
 		ll.append(summary)
+		sl.append(txt)
+		sbig += txt
 	return ll
 	
 if __name__ == "__main__":

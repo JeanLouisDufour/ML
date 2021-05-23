@@ -10,7 +10,8 @@ image, min_confidence, NMS_threshold = "scream.jpg", 0.5, 0.5
 image, min_confidence, NMS_threshold = "horses.jpg", 0.5, 0.3
 
 ######################################
-
+blob_shape = (416, 416)
+#blob_shape = (208, 416) # -> erreur concat_layer.cpp:95
 # https://github.com/pjreddie/darknet/blob/master/data/coco.names
 y_n = "coco.names"
 # https://github.com/pjreddie/darknet/blob/master/cfg/yolov3.cfg
@@ -26,7 +27,7 @@ COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
 net = cv.dnn.readNetFromDarknet(y_cfg, y_weights)
 if True:
 	net1 = my_cv_dnn.ReadDarknetFromCfg(y_cfg)
-	layers = my_cv_dnn.analyze(net, [1, 3, 416, 416])
+	layers = my_cv_dnn.analyze(net, (1, 3) + blob_shape)
 	l1 = [d["layer_name"] for d in net1["layers"]]
 	l2 = [l[0] for l in layers]
 	assert l1 == l2[1:]
@@ -40,19 +41,42 @@ print(image.shape, image.dtype)
 (H, W) = image.shape[:2]
 
 # determine only the *output* layer names that we need from YOLO
-ln = net.getLayerNames()
-ln = [ln[i[0] - 1] for i in net.getUnconnectedOutLayers()]
-# construct a blob from the input image and then perform a forward
-# pass of the YOLO object detector, giving us our bounding boxes and
-# associated probabilities
-blob = cv.dnn.blobFromImage(image, 1 / 255.0, (416, 416), swapRB=True, crop=False)
-blob1 = my_cv_dnn.blobFromImage(image, 1 / 255.0, (416, 416), swapRB=True, crop=False)
+lnames = net.getLayerNames()
+#ln = [lnames[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+ln = net.getUnconnectedOutLayersNames()
+
+# WARNING : en opencv, Size(W,H) et resize(W,H)
+blob_WH = (blob_shape[1], blob_shape[0])
+blob = cv.dnn.blobFromImage(image, 1 / 255.0, blob_WH, swapRB=True, crop=False)
+assert blob.shape == (1,3) + blob_shape
+blob1 = my_cv_dnn.blobFromImage(image, 1 / 255.0, blob_WH, swapRB=True, crop=False)
 assert all((blob == blob1).flatten())
+#### test
+####
 net.setInput(blob)
+if True:
+	ln = ['relu_1','conv_2'] + ln
 start = time.perf_counter()
 layerOutputs = net.forward(ln)
 end = time.perf_counter()
 print(f"[INFO] YOLO took {end-start} seconds")
+if True:
+	ln = ln[2:]
+	y6,y7 =layerOutputs[:2]
+	layerOutputs = layerOutputs[2:]
+
+if False:
+	lnames = ['']+lnames # _input
+	print('BEGIN')
+	yy = []
+	for i,n in enumerate(lnames):
+		print(i,n)
+		rl = net.forward([n])
+		if len(rl) != 1:
+			_ = 2+2
+		yy.append(rl[0].copy())
+	print('END')
+	assert all(yy[0].flatten()==blob.flatten())
 
 assert len(ln) == len(layerOutputs)
 boxes = []
@@ -98,4 +122,4 @@ if len(idxs) > 0:
 
 print('done')
 cv.imshow("Image", image)
-cv.waitKey(0)
+cv.waitKey(1)
