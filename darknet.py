@@ -1,23 +1,32 @@
-import numpy as np
+import numpy as np, os
 import struct
+from math import prod
 
-def read_weights(weight_file):
+def read_weights(weight_file, bsll=None):
 	""
 	with open(weight_file, 'rb') as w_f:
+		fsz = os.fstat(w_f.fileno()).st_size
 		major,    = struct.unpack('i', w_f.read(4))
 		minor,    = struct.unpack('i', w_f.read(4))
 		revision, = struct.unpack('i', w_f.read(4))
 
 		if (major*10 + minor) >= 2 and major < 1000 and minor < 1000:
 			w_f.read(8)
+			offset = 20
 		else:
 			w_f.read(4)
+			offset = 16
 
-		transpose = (major > 1000) or (minor > 1000)
-            
-		binary = w_f.read()
-
-	all_weights = np.frombuffer(binary, dtype='float32')
+		#??? transpose = (major > 1000) or (minor > 1000)
+		if bsll is None:
+			#binary = w_f.read()
+			all_weights = np.frombuffer(w_f.read(), dtype='float32')
+		else:
+			bsz = blob_sz(bsll) * 4
+			if bsz+offset != fsz:
+				assert False, ("bad sizes", fsz, offset, bsz)
+			all_weights = [[np.frombuffer(w_f.read(prod(bs)*4), dtype='float32').reshape(bs) for bs in bsl] for bsl in bsll]
+				
 	return all_weights
 
 class WeightReader:
@@ -145,9 +154,12 @@ def cfg_sizes(cfg, HW):
 			# OpenCV
 			cv_layer_name = f"conv_{cv_layer_id}"
 			assert osh[2]%stride == 0 and osh[3]%stride == 0
-			ish = osh; osh = (ish[0], filters, ish[2]//stride, ish[3]//stride); bsh = (osh[1],) + ish[1:]
+			ish = osh; osh = (ish[0], filters, ish[2]//stride, ish[3]//stride)
+			bsl = [(osh[1], ish[1], size, size)]
+			if batch_normalize == 0:
+				bsl.append((1, osh[1]))
 			cv_layer = {'name': cv_layer_name, 'cfg_idx': cfg_idx, "bottom_indexes": [cv_last_layer], \
-			   "isl": [ish], "os": osh, "bsl": [bsh], \
+			   "isl": [ish], "os": osh, "bsl": bsl, \
 			   "bias_term": batch_normalize==0}
 			cv_layers.append(cv_layer)
 			cv_last_layer = cv_layer_name
@@ -252,9 +264,10 @@ def cfg_sizes(cfg, HW):
 			cv_layer_name = f"yolo_{cv_layer_id}" ### ATTENTION: cv Region
 			ish1 = osh; ish2 = (1,3) + HW; isl = [ish1,ish2]
 			osh = (3*ish1[1]*ish1[2], 85)
+			blob = np.array([usedAnchors], dtype=np.float32) # shape : (1,6)
 			cv_layer = {'name': cv_layer_name, 'cfg_idx': cfg_idx, "bottom_indexes": [cv_last_layer, cv_FirstLayerName], \
-				"isl": isl, "os": osh, "bsl": [(1,6)], \
-				"classes": classes, "anchors": numAnchors, "logistic": True, "blobs": [usedAnchors]}
+				"isl": isl, "os": osh, "bsl": [blob.shape], \
+				"classes": classes, "anchors": numAnchors, "logistic": True, "blobs": [blob]}
 			cv_layers.append(cv_layer)
 			cv_last_layer = cv_layer_name
 			cv_layer_id += 1
@@ -265,9 +278,68 @@ def cfg_sizes(cfg, HW):
 		out_channels_vec[layers_counter] = osh
 	return cv_layers
 
+def cv_layers_dump(cv_layers):
+	""
+	txt = ''
+	for li,l in enumerate(cv_layers):
+		ln = l['name']
+		lt = l.get('type','???')
+		bsh_l = l['bsl']
+		ish_l = l.get('isl',[])
+		osh_l = [l['os']]
+		summary = [ln, lt, bsh_l, ish_l, osh_l]
+		txt += f'{li} {ln} {lt}\n\tblobs  : {summary[2]}\n\tinputs : {summary[3]}\n\toutput : {summary[4][0]}\n'
+	return txt
+
+def blob_shapes(cv_layers):
+	"les yolos sont exclus"
+	bsll = [l['bsl'] if not l['name'].startswith('yolo') else [] for l in cv_layers]
+	return bsll
+	
+def blob_sz(bsll):
+	""
+	bsz = 0
+	for bsl in bsll:
+		bsz += sum(prod(bs) for bs in bsl)
+	return bsz
+
+def update_yolos_weights(cv_layers, bsll, weights):
+	""
+	assert len(cv_layers) == len(bsll) == len(weights)
+	for i,(l,bsl,bl) in enumerate(zip(cv_layers,bsll,weights)):
+		if l["name"].startswith('yolo'):
+			assert bsl == bl == []
+			bsl.extend(l['bsl'])
+			bl.extend(l['blobs'])
+
 if __name__ == "__main__":
 	cfg = read_cfg('yolov3.cfg')
 	cv_layers = cfg_sizes(cfg, (416,416))
 	# weights = read_weights('yolov3.weights') # 62001757
+	bsll = blob_shapes(cv_layers)
+	# bsz = blob_sz(bsll)
+	# txt = cv_layers_dump(cv_layers)
+	weights = read_weights('yolov3.weights', bsll)
+	update_yolos_weights(cv_layers, bsll, weights)
 	
+	# test avec opencv.dnn
 	
+	try:
+		import cv2 as cv
+		print('test opencv')
+		net = cv.dnn.readNetFromDarknet('yolov3.cfg', 'yolov3.weights')
+		lnames = net.getLayerNames()
+		lnames = ['_input']+lnames # _input
+		ll = [net.getLayer(i) for i in range(len(lnames))]
+		assert all(l.name == n for l,n in zip(ll,lnames))
+		bll_cv = [l.blobs for l in ll]
+		bsll_cv = [[b.shape for b in bl] for bl in bll_cv]
+		assert bsll_cv == bsll
+		for i,(bl_cv,bl) in enumerate(zip(bll_cv, weights)):
+			assert len(bl_cv) == len(bl)
+			for j, (b_cv,b) in enumerate(zip(bl_cv, bl)):
+				if not all(b_cv.flatten() == b.flatten()):
+					assert False, (i,j)
+		
+	except ModuleNotFoundError:
+		print('opencv needed for more tests')
