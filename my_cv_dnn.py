@@ -394,21 +394,21 @@ def ReadDarknetFromCfg(cfg_fn, CV_450 = False):
 
 #######################################################
 
-def BatchNorm_shapes(bsh_l, ish_l, osh_l):
+def BatchNorm_shapes(bsh_l, ish_l, params={}):
 	""
 	assert len(bsh_l) == 4, bsh_l
-	assert ish_l == osh_l
-	assert all(bsh==(1, ish_l[0][1]) for bsh in bsh_l)
+	[ish] = ish_l
+	assert all(bsh==(1, ish[1]) for bsh in bsh_l)
+	return ish
 
-def Concat_shapes(bsh_l, ish_l, osh_l):
+def Concat_shapes(bsh_l, ish_l, params={}):
 	""
 	assert bsh_l == []
 	i1,i2 = ish_l
-	[o] = osh_l
-	assert i1[2:] == i2[2:] == o[2:]
-	assert i1[1]+i2[1] == o[1]
+	assert i1[0] == i2[0] and i1[2:] == i2[2:]
+	return (i1[0], i1[1]+i2[1]) + i1[2:]
 
-def Convolution_shapes(bsh_l, ish_l, osh_l, stride=1):
+def Convolution_shapes(bsh_l, ish_l, params={'stride':1}):
 	""
 	assert len(bsh_l) in (1,2)
 	bsh = bsh_l[0]
@@ -418,12 +418,9 @@ def Convolution_shapes(bsh_l, ish_l, osh_l, stride=1):
 		# blobs  : [(255, 256, 1, 1), (1, 255)]
 		assert bsh_l[1] == (1, bsh[0])
 	[ish] = ish_l
-	assert ish[1] == bsh[1]
-	[osh] = osh_l
-	assert osh[0] == ish[0] ==1
-	assert osh[1] == bsh[0]
-	assert osh[2:] in ( ish[2:], (ish[2]/2, ish[3]/2) ), (ish, osh)
-	#print('Convolution_shapes')
+	assert ish[0] ==1 and ish[1] == bsh[1]
+	stride = params.get('stride',1)
+	return (1, bsh[0]) + (ish[2]/stride, ish[3]/stride)
 
 def Convolution_k1(b,bias,inp,o):
 	""
@@ -456,7 +453,9 @@ def Convolution_forward(bl,il, stride=1):
 	inputs : [[1, 256, 52, 52]]
 	output : [1, 255, 52, 52]
 	
-	[b252] = net.getLayer('conv_105').blobs pour bias
+	bl = net.getLayer('conv_105').blobs pour bias
+	zz = Convolution_forward(bl,[xx])
+	np.max(np.abs(zz.flatten()-yy.flatten())) -> 
 	"""
 	b = bl[0]
 	bs = b.shape
@@ -478,12 +477,11 @@ def Convolution_forward(bl,il, stride=1):
 		assert False, "kernel size not implemented"
 	return o	
 
-def ReLU_shapes(bsh_l, ish_l, osh_l):
+def ReLU_shapes(bsh_l, ish_l, params={}):
 	""
 	assert bsh_l == []
 	[ish] = ish_l
-	[osh] = osh_l
-	assert ish == osh
+	return ish
 	
 
 layer_d = { # fils de Layer, sauf precision ; cf all_layers.hpp
@@ -567,7 +565,13 @@ type
 		ish_l = [tuple(x.flatten().tolist()) for x in in_s]
 		osh_l = [tuple(x.flatten().tolist()) for x in out_s]
 		if lt_methods:
-			lt_methods[0](bsh_l, ish_l, osh_l)
+			osh = lt_methods[0](bsh_l, ish_l)
+			if osh != osh_l[0]:
+				if lt == 'Convolution':
+					osh = lt_methods[0](bsh_l, ish_l,{'stride':2})
+					assert osh == osh_l[0]
+				else:
+					assert False
 		#
 		summary = [ln, lt, bsh_l, ish_l, osh_l]
 		txt = f'{li} {ln} {lt}\n\tblobs  : {summary[2]}\n\tinputs : {summary[3]}\n\toutput : {summary[4][0]}\n'
@@ -582,4 +586,4 @@ type
 	return ll
 	
 if __name__ == "__main__":
-	net = ReadDarknetFromCfg('yolov3.cfg')
+	net_ = ReadDarknetFromCfg('yolov3.cfg')

@@ -55,15 +55,15 @@ assert all((blob == blob1).flatten())
 ####
 net.setInput(blob)
 if True:
-	ln = ['relu_1','conv_2'] + ln
+	ln =  ln + ['relu_104','conv_105']
 start = time.perf_counter()
 layerOutputs = net.forward(ln)
 end = time.perf_counter()
 print(f"[INFO] YOLO took {end-start} seconds")
 if True:
-	ln = ln[2:]
-	y6,y7 =layerOutputs[:2]
-	layerOutputs = layerOutputs[2:]
+	ln = ln[:-2]
+	xx,yy = layerOutputs[-2:]
+	layerOutputs = layerOutputs[:-2]
 
 if False:
 	lnames = ['']+lnames # _input
