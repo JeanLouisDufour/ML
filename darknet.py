@@ -125,13 +125,28 @@ def read_cfg(cfg_fn):
 			current_d[name] = value
 	net.append(current_d)
 	fd.close()
+	assert net[0][''] == 'net'
+	for d in net[1:]:
+		assert set(d) <= layer_check_d[d['']]
 	return net
 
-def cfg_sizes(cfg, HW):
+layer_check_d = {
+	'convolutional': {'', 'activation', 'batch_normalize', 'filters', 'pad', 'size', 'stride'},
+	'route': {'', 'layers'},
+	'shortcut': {'', 'activation', 'from'},
+	'upsample': {'', 'stride'},
+	'yolo': {'', 'anchors', 'classes', 'ignore_thresh', 'jitter', 'mask', 'num',  'random', 'truth_thresh'},
+	}
+
+def cfg_sizes(cfg, HW=None):
 	""
 	assert len(HW) == 2
 	assert cfg[0][''] == 'net'
-	osh = (1,3) + HW                        # output shape
+	assert cfg[0]['channels'] == 3
+	if HW is None:
+		HW = (cfg[0]['height'], cfg[0]['width'])
+	HWC = HW + (3,) # darknet params
+	osh = (1,3) + HW                        # CV output shape
 	out_channels_vec = [None] * (len(cfg)-1) # liste des osh
 	cv_layer_id = 0
 	cv_last_layer = cv_FirstLayerName = "data"
@@ -151,6 +166,21 @@ def cfg_sizes(cfg, HW):
 			assert size in (1,3)
 			stride = d['stride']
 			assert stride in (1,2)
+			# 
+			(h,w,c) = HWC
+			assert h%stride == w%stride == 0
+			out_h = h // stride
+			out_w = w // stride
+			out_c = filters
+			HWC = (out_h, out_w, out_c)
+			d['HWC_out'] = HWC
+			# blobs
+			d['blobs'] = bl = [("biases", (filters,))]
+			if batch_normalize:
+				bl.append(("scales",(filters,)))
+				bl.append(("rolling_mean",(filters,)))
+				bl.append(("rolling_variance",(filters,)))
+			bl.append(("weights",(filters*c*size*size,)))
 			# OpenCV
 			cv_layer_name = f"conv_{cv_layer_id}"
 			assert osh[2]%stride == 0 and osh[3]%stride == 0
@@ -185,7 +215,23 @@ def cfg_sizes(cfg, HW):
 			layers_vec = d['layers']
 			if not isinstance(layers_vec,list):
 				layers_vec = [layers_vec]
-			assert all(l != 0 for l in layers_vec) 
+			assert all(l != 0 for l in layers_vec)
+			#
+			li1 = layers_vec[0]
+			assert li1 < 0
+			layer1 = cfg[li1+cfg_idx]
+			HWC1 = layer1['HWC_out']
+			if len(layers_vec) == 1:
+				HWC = HWC1
+			else:
+				li2 = layers_vec[1]
+				assert li2 > 0
+				layer2 = cfg[li2] ## 1-based ????
+				HWC2 = layer2['HWC_out']
+				assert HWC1[1:] == HWC2[1:]
+				HWC = (HWC1[0]+HWC2[0],) + HWC1[1:]
+			d['HWC_out'] = HWC
+			# 
 			layers_vec_abs = [l if l >= 0 else (l + layers_counter) for l in layers_vec]
 			isl = [out_channels_vec[l] for l in layers_vec_abs]
 			assert all(sh[2:] == isl[0][2:] for sh in isl[1:]), (cfg_idx, cv_layer_id, isl)
@@ -205,13 +251,18 @@ def cfg_sizes(cfg, HW):
 			assert set(d) <= {'', 'activation', 'from'}
 			from_ = d['from']
 			assert from_ < 0
-			from_abs = from_ + layers_counter if from_ < 0 else from_
 			activation = d["activation"]
 			assert activation == 'linear'
+			# 
+			from_layer = cfg[from_+cfg_idx]
+			from_HWC = from_layer['HWC_out']
+			assert from_HWC == HWC
+			d['HWC_out'] = HWC
+			# OpenCV
+			from_abs = from_ + layers_counter if from_ < 0 else from_
 			ish2 = out_channels_vec[from_abs]
 			assert osh == ish2
 			isl = [osh,ish2]
-			# OpenCV
 			cv_layer_name = f"shortcut_{cv_layer_id}"  #### ATTENTION : cv Eltwise
 			cv_layer = {'name': cv_layer_name, 'cfg_idx': cfg_idx, \
 			   "bottom_indexes": [cv_last_layer, cv_fused_layer_names[from_abs]], \
@@ -226,6 +277,9 @@ def cfg_sizes(cfg, HW):
 			assert set(d) <= {'', 'stride'}
 			stride = d['stride']
 			assert stride == 2
+			#
+			TBD
+			#
 			isl = [osh]; osh = osh[:2] + (osh[2]*stride, osh[3]*stride)
 			# OpenCV
 			cv_layer_name = f"upsample_{cv_layer_id}"  #### ATTENTION : cv Resize
@@ -291,7 +345,12 @@ def cv_layers_dump(cv_layers):
 		txt += f'{li} {ln} {lt}\n\tblobs  : {summary[2]}\n\tinputs : {summary[3]}\n\toutput : {summary[4][0]}\n'
 	return txt
 
-def blob_shapes(cv_layers):
+def blob_shapes(cfg):
+	""
+	bsll = [[sh for _,sh in l.get('blobs', [])] for l in cfg[1:]]
+	return bsll
+
+def cv_blob_shapes(cv_layers):
 	"les yolos sont exclus"
 	bsll = [l['bsl'] if not l['name'].startswith('yolo') else [] for l in cv_layers]
 	return bsll
@@ -316,7 +375,8 @@ if __name__ == "__main__":
 	cfg = read_cfg('yolov3.cfg')
 	cv_layers = cfg_sizes(cfg, (416,416))
 	# weights = read_weights('yolov3.weights') # 62001757
-	bsll = blob_shapes(cv_layers)
+	bsll = blob_shapes(cfg)
+	cv_bsll = cv_blob_shapes(cv_layers)
 	# bsz = blob_sz(bsll)
 	# txt = cv_layers_dump(cv_layers)
 	weights = read_weights('yolov3.weights', bsll)
@@ -325,7 +385,7 @@ if __name__ == "__main__":
 	# test avec opencv.dnn
 	
 	try:
-		import cv2 as cv
+		import cv2 as cv, foo
 		print('test opencv')
 		net = cv.dnn.readNetFromDarknet('yolov3.cfg', 'yolov3.weights')
 		lnames = net.getLayerNames()
