@@ -18,6 +18,7 @@ def read_weights(weight_file, bsll=None):
 			offset = 16
 
 		#??? transpose = (major > 1000) or (minor > 1000)
+		print('reading weights')
 		if bsll is None:
 			#binary = w_f.read()
 			all_weights = np.frombuffer(w_f.read(), dtype='float32')
@@ -26,7 +27,7 @@ def read_weights(weight_file, bsll=None):
 			if bsz+offset != fsz:
 				assert False, ("bad sizes", fsz, offset, bsz)
 			all_weights = [[np.frombuffer(w_f.read(prod(bs)*4), dtype='float32').reshape(bs) for bs in bsl] for bsl in bsll]
-				
+		print('done')
 	return all_weights
 
 def read_cfg(cfg_fn):
@@ -96,8 +97,10 @@ def cfg_sizes(cfg, HW=None):
 	layers = cfg[1:] # darknet net->layers
 	for cfg_idx, d in enumerate(layers, start=1):
 		layers_counter = cfg_idx-1			### 0-based : celui de darknet
+		# d['HWC_in'] = HWC # modifie dans certains cas
 		if d[''] == 'convolutional': # conv_x bn_x relu_x
 			assert set(d) <= {'', 'activation', 'batch_normalize', 'filters', 'pad', 'size', 'stride'}
+			d['HWC_in'] = HWC
 			assert d['pad'] == 1
 			activation = d.get("activation", "linear")
 			assert activation in ('leaky','linear')
@@ -115,6 +118,7 @@ def cfg_sizes(cfg, HW=None):
 			out_w = w // stride
 			out_c = filters
 			HWC = (out_h, out_w, out_c)
+			d['workspace_shape'] = (c*size**2,out_h,out_w)
 			# blobs
 			bl = [("biases", (filters,))]
 			if batch_normalize:
@@ -321,6 +325,66 @@ def update_yolos_weights(layers, bsll, weights):
 			bsl.extend(l['bsl'])
 			bl.extend(l['blobs'])
 
+############ layers ##############
+
+def make_empty(HWC):
+	""
+	if len(HWC) == 2:
+		return np.empty(HW, dtype = np.float32)
+	elif len(HWC) == 3:
+		return np.empty(HWC[2:]+HWC[:2], dtype = np.float32)
+	else:
+		assert False
+
+output_list = []
+
+def forward(l,input_im, wl, output_im):
+	""
+	h_o,w_o,c_o = l['HWC_out']
+	assert output_im.shape == (c_o, h_o, w_o)
+	if l[''] == 'convolutional':
+		assert len(wl) in (2,5)
+		biases = wl[0]
+		weights = wl[-1]
+		output_im[:] = 0
+		h_i,w_i,c_i = l['HWC_in']
+		assert input_im.shape == (c_i, h_i, w_i)
+		filters = l['filters']
+		size = l['size']
+		m = filters
+		k = size**2 * c_i
+		n = w_o * h_o
+		a = weights
+		# b = workspace # ?????
+		c = output_im
+		im = input_im
+		if l['size'] == 1:
+			b = im
+		else:
+			wksp_sh = l['workspace_shape']
+			wksp_flat = workspace[:np.prod(wksp_sh)]
+			b = wksp_flat.reshape(wksp_sh)
+			_ = 2+2 
+		_ = 2+2
+		if l.get('batch_normalize',0):
+			# forward_batchnorm_layer
+			_ = 2+2
+		else:
+			# add_bias
+			for c_idx in range(c_o):
+				output_im[c_idx] += biases[c_idx]
+		# relu : np.maximum(x, 0, x)
+		if l['activation'] == 'leaky':
+			o_f = output_im.reshape(-1)
+			eps = np.float32(0.01)
+			for i,x in enumerate(o_f):
+				if x < 0:
+					o_f[i] *= eps
+			# np.maximum(output_im, output_im*np.float32(0.01), output_im)  A TESTER
+	else:
+		assert False, l['']
+	return output_im
+
 ############ image.c #############
 
 f32 = np.float32
@@ -342,6 +406,7 @@ def resize_image(im,w,h):
 	part = np.zeros((im_c,im_h,w), np.float32)
 	w_scale = np.divide(im_w - 1 ,w - 1, dtype=np.float32)
 	h_scale = np.divide(im_h - 1 ,h - 1, dtype=np.float32)
+	"""
 	for k in range(im_c):
 		for r in range(im_h):
 			for c in range(w):
@@ -354,22 +419,45 @@ def resize_image(im,w,h):
 					assert 0 <= dx < 1, dx
 					val = (f32(1)-dx)*im[k,r,ix] + dx*im[k,r,ix+1]
 				part[k,r,c] = val
+	"""
+	assert im_w != 1
+	for c in range(w-1):
+		sx = f32(c)*w_scale
+		ix = int(sx)
+		dx = sx-f32(ix)
+		assert 0 <= dx < 1, dx
+		part[:,:,c] = (f32(1)-dx)*im[:,:,ix] + dx*im[:,:,ix+1]
+	part[:,:,-1] = im[:,:,-1]
+	#
 	for k in range(im_c):
 		for r in range(h):
 			sy = f32(r)*h_scale
 			iy = int(sy)
 			dy = sy - f32(iy)
 			assert 0 <= dy < 1, dy
+			"""
 			for c in range(w):
 				resized[k,r,c] = (f32(1)-dy) * part[k,iy,c]
+			"""
+			resized[k,r,:] = (f32(1)-dy) * part[k,iy,:]
 			if r == h-1 or im_h == 1: continue
+			"""
 			for c in range(w):
 				resized[k,r,c] += dy * part[k,iy+1,c]
+			"""
+			resized[k,r,:] += dy * part[k,iy+1,:]
 	return resized
 
-def embed_image(resized, boxed, dw, dh):
+def embed_image(src, dst, dx, dy):
 	""
-	pass
+	_c,h,w = src.shape
+	dst[:, dy:dy+h, dx:dx+w] = src
+	"""
+	for k in range(c):
+		for y in range(h):
+			for x in range(w):
+				dst[k, dy+y, dx+x] = src[k,y,x]
+	"""
 
 def letterbox_image(im,w,h):
 	""
@@ -381,7 +469,7 @@ def letterbox_image(im,w,h):
 		new_h = h
 		new_w = (o_w * h) // o_h 
 	resized = resize_image(im, new_w, new_h)
-	boxed = mp.ones((c,h,w), np.float32) * np.float32(0.5)
+	boxed = np.full((c,h,w), 0.5, dtype=np.float32)
 	embed_image(resized, boxed, (w-new_w)//2, (h-new_h)//2)
 	return boxed
 
@@ -391,6 +479,8 @@ if __name__ == "__main__":
 	
 	import imageio
 	file = 'horses.jpg' # 512*773
+	file = 'horses.png' # 512*773  # PNG PNG PNG !!!!
+	chk_ref = True
 	# RGB
 	image_io = imageio.imread(file)
 	assert image_io.shape[2] == 3 and image_io.dtype == np.uint8
@@ -401,20 +491,38 @@ if __name__ == "__main__":
 		assert image_cv.shape == image_io.shape and image_cv.dtype == image_io.dtype
 		for i in range(3):
 			assert all(image_io[:,:,2-i].flatten() == image_cv[:,:,i].flatten())
+	if chk_ref:
+		print('reading refs')
+		dk_dir = r'C:\Users\F074018\Documents\darknet\data' + '\\' + file
+		im_ref = np.frombuffer(open(dk_dir+'.im.dat','rb').read(), dtype='float32')
+		part_ref = np.frombuffer(open(dk_dir+'.part.dat','rb').read(), dtype='float32')
+		resized_ref = np.frombuffer(open(dk_dir+'.resized.dat','rb').read(), dtype='float32')
+		input_ref = np.frombuffer(open(dk_dir+'.input.dat','rb').read(), dtype='float32')
+		l0_ref = np.frombuffer(open(dk_dir+'.0.dat','rb').read(), dtype='float32')
+		print('done')
 	# RGB
 	image_dk = np.empty((3,)+image_io.shape[:2], np.float32)
 	for i in range(3):
 		# image_dk[i,:,:] = np.float32(image_io[:,:,i]) / 255
 		image_dk[i,:,:] = np.divide(image_io[:,:,i], 255, dtype=np.float32)
-	foo = letterbox_image(image_dk, 608, 608)
-	
-	
-	
+	print('resizing input image')
+	input_im = letterbox_image(image_dk, 608, 608)
+	print('done')
+	if chk_ref:
+		assert all(input_im.flat == input_ref), sum(input_im.flat != input_ref)
 	
 	cfg = read_cfg('yolov3.cfg')
 	HW = (416,416)
 	HW = None
 	layers, cv_layers = cfg_sizes(cfg, HW)
+	print('allocating memory')
+	output_l = [make_empty(l['HWC_out']) for l in layers]
+	print('done')
+	print('allocating workspace')
+	wksp_l = [np.prod(l.get('workspace_shape',(0,))) for l in layers]
+	wksp_sz = max(wksp_l)
+	workspace = np.empty((wksp_sz,), dtype=np.float32)
+	print('done')
 	# weights = read_weights('yolov3.weights') # 62001757
 	bsll = blob_shapes(layers)
 	cv_bsll = cv_blob_shapes(cv_layers)
@@ -422,6 +530,12 @@ if __name__ == "__main__":
 	# txt = cv_layers_dump(cv_layers)
 	weights = read_weights('yolov3.weights', bsll)
 	update_yolos_weights(layers, bsll, weights)
+	
+	for li,(l,wl,o) in enumerate(zip(layers, weights, output_l)):
+		# l.forward(l,net)
+		print(f"layer {li}")
+		forward(l, input_im, wl,o)
+		input_im = o
 	
 	# test avec opencv.dnn
 	
