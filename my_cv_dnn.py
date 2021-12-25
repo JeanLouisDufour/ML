@@ -62,7 +62,10 @@ def ReadDarknetFromCfg(cfg_fn, CV_450 = False):
 		return s
 	net = []
 	current_d = None
-	fd = open(cfg_fn,"rt")
+	if isinstance(cfg_fn, str):
+		fd = open(cfg_fn,"rt")
+	else:
+		fd = cfg_fn
 	for line in fd:
 		line = line.strip()
 		if line == "" or line[0] in "#;": continue
@@ -84,7 +87,8 @@ def ReadDarknetFromCfg(cfg_fn, CV_450 = False):
 				value = parse(value)
 			current_d[name] = value
 	net.append(current_d)
-	fd.close()
+	if isinstance(cfg_fn, str):
+		fd.close()
 	#
 	assert net[-1][''] == 'yolo'
 	anchors = net[-1]['anchors']
@@ -537,6 +541,7 @@ type
 	sl = []
 	sbig = ''
 	ll = []
+	convol_flow = 0
 	#s = set()
 	l_input = net.getLayer(0)
 	assert  l_input.name == '_input' \
@@ -564,6 +569,12 @@ type
 		bsh_l = [b.shape for b in bl]
 		ish_l = [tuple(x.flatten().tolist()) for x in in_s]
 		osh_l = [tuple(x.flatten().tolist()) for x in out_s]
+		bsh_sz = sum(np.prod(l) for l in bsh_l)
+		ish_sz = sum(np.prod(l) for l in ish_l)
+		osh_sz = sum(np.prod(l) for l in osh_l)
+		convol_flow += bsh_sz
+		if lt not in ('BatchNorm', 'ReLU'):
+			convol_flow += ish_sz + osh_sz
 		if lt_methods:
 			osh = lt_methods[0](bsh_l, ish_l)
 			if osh != osh_l[0]:
@@ -574,7 +585,9 @@ type
 					assert False
 		#
 		summary = [ln, lt, bsh_l, ish_l, osh_l]
-		txt = f'{li} {ln} {lt}\n\tblobs  : {summary[2]}\n\tinputs : {summary[3]}\n\toutput : {summary[4][0]}\n'
+		bsh_pc = bsh_sz / (bsh_sz+ish_sz)
+		ish_pc = ish_sz / (bsh_sz+ish_sz)
+		txt = f'{li} {ln} {lt}\n\tblobs  : {summary[2], bsh_pc}\n\tinputs : {summary[3]}\n\toutput : {summary[4][0]}\n'
 		print(txt)
 		#print(li, ln, lt)
 		#print('\tblobs  : ', summary[2])
@@ -583,6 +596,7 @@ type
 		ll.append(summary)
 		sl.append(txt)
 		sbig += txt
+	print('convolutions flow : ', convol_flow)
 	return ll
 	
 if __name__ == "__main__":

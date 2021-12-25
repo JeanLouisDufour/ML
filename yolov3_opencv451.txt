@@ -1,0 +1,37 @@
+test_darknet_importer.cpp:
+
+        Net net = readNetFromDarknet(cfgFile, weightsFile);
+        net.setInput(inp);
+        net.setPreferableBackend(DNN_BACKEND_OPENCV);
+        ref = net.forward();
+
+*******************************************		
+dnn/dnn.hpp:
+
+class ... Net
+	...
+	CV_WRAP Mat forward(const String& outputName = String());
+
+*********************************************
+dnn.cpp:
+
+Mat Net::forward(const String& outputName)
+{
+    CV_TRACE_FUNCTION();
+    CV_Assert(!empty());
+
+    String layerName = outputName;
+
+    if (layerName.empty())
+    {
+        std::vector<String> layerNames = getLayerNames();
+        CV_Assert(!layerNames.empty());
+        layerName = layerNames.back();
+    }
+
+    std::vector<LayerPin> pins(1, impl->getPinByAlias(layerName));
+    impl->setUpNet(pins);
+    impl->forwardToLayer(impl->getLayerData(layerName));
+
+    return impl->getBlob(layerName);
+}

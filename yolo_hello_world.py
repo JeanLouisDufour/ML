@@ -6,19 +6,19 @@ import my_cv_dnn
 
 # https://github.com/pjreddie/darknet/blob/master/data/dog.jpg
 image, min_confidence, NMS_threshold = "dog.jpg", 0.5, 0.3
-image, min_confidence, NMS_threshold = "scream.jpg", 0.5, 0.5
+#image, min_confidence, NMS_threshold = "scream.jpg", 0.5, 0.5
 image, min_confidence, NMS_threshold = "horses.jpg", 0.5, 0.3
 
 ######################################
 blob_shape = (416, 416)
 #blob_shape = (208, 416) # -> erreur concat_layer.cpp:95
+data_dir = r"E:\github_data\ML" + "\\" 
 # https://github.com/pjreddie/darknet/blob/master/data/coco.names
 y_n = "coco.names"
 # https://github.com/pjreddie/darknet/blob/master/cfg/yolov3.cfg
 y_cfg = "yolov3.cfg"
 # https://pjreddie.com/media/files/yolov3.weights
-y_weights = "yolov3.weights"
-
+y_weights = data_dir+"yolov3.weights"
 
 LABELS = open(y_n).read().strip().split("\n")
 np.random.seed(42)
@@ -56,6 +56,7 @@ assert all((blob == blob1).flatten())
 net.setInput(blob)
 if True:
 	ln =  ln + ['relu_104','conv_105']
+print(f"[INFO] YOLO starts")
 start = time.perf_counter()
 layerOutputs = net.forward(ln)
 end = time.perf_counter()
