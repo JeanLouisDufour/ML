@@ -28,7 +28,7 @@ with open(y_cfg) as fd:
 #y_cfg_lines = y_cfg_lines[:last_line]
 y_cfg_txt = ''.join(y_cfg_lines).encode('cp1250')
 
-my_net = my_cv_dnn.ReadDarknetFromCfg(y_cfg)
+my_net = my_cv_dnn.ReadDarknetFromCfg(y_cfg, CV_450 = False)
 my_layers = my_net['layers']
 
 def read_raw_weights(weight_file, bsz):
@@ -228,18 +228,23 @@ def relu_(inp, blobs=[], out=None):
 	np.maximum(inp, out, out=out) # alias supporte
 	return out # np.maximum(inp, relu_coeff*inp)
 
+one_f32 = np.float32(1)
+half_f32 = np.float32(0.5)
+logistic_activate = lambda x: one_f32 / (one_f32 + np.exp(-x))
+
 prev_name = None
 out_d = {}
 inp = blob # init : shape = (1,3,h,w)
 for idx, (lo,Li,mLi) in enumerate(zip(layerOutputs, L[1:], my_layers[:len(layerOutputs)]), start=1):
 	# lo.shape == (1,c,h,w), sauf sur un Region : (N,85)
 	print(Li.name)
-	assert Li.type == mLi['layer_type'] and Li.name == mLi['layer_name']
+	assert Li.type == mLi['layer_type']
+	assert Li.name == mLi['layer_name'], (Li.name , mLi['layer_name'])
 	params = mLi['layerParams']
-	if not Li.name.startswith('yolo_'):
+	#if not Li.name.startswith('yolo_'):
 	#if not params.get('bias_term', False):
 	#if Li.name.startswith('conv_'):
-	#if False:
+	if False:
 		lo_estim = lo
 	elif Li.type == 'BatchNorm':
 		assert Li.name.startswith('bn_')
@@ -287,13 +292,56 @@ for idx, (lo,Li,mLi) in enumerate(zip(layerOutputs, L[1:], my_layers[:len(layerO
 		assert Li.name.startswith('yolo_')
 		n1,n2 = mLi['bottom_indexes']
 		assert n1 == prev_name and n2 == 'data'
-		assert params['logistic'] is True and params['anchors'] == 3 and params['classes'] == 80
+		inp_data = blob # 1,3,416,416
 		[b] = params['blobs']
-		assert len(b) == 6 and (Li.blobs[0] == b).all()
-		# yolo_82 : inp : (1,13,13,255) -> 507
-		# yolo_94 : inp : (1,26,26,255) -> 2028
+		[[b_f32]] = Li.blobs
+		assert len(b) == 6 and (b_f32 == b).all() # 6 == 2*3
+		################# constructeur RegionLayerImpl ###########
+		thresh = params.get("thresh", 0.2)
+		coords = params.get("coords", 4)
+		anchors = params['anchors']           # 3
+		classes = params['classes']			# 80
+		classfix = params.get("classfix", 0)
+		useSoftmax = params.get("softmax", False)
+		useLogistic = params.get("logistic", False)  # True
+		nmsThreshold = params.get("nms_threshold", 0.4)
+		scale_x_y = params.get("scale_x_y", 1.0) # Yolov4
+		assert nmsThreshold >= 0 and coords ==4 and (useLogistic and not useSoftmax) and anchors == 3 and classes == 80
+		# yolo_82 : inp : (1,13,13,255) -> (507, 85)
+		# yolo_94 : inp : (1,26,26,255) -> (2028, 85)
 		# yolo_106 : ...
-		lo_estim = np.zeros((np.prod(inp.shape[1:3]) * 3, 85), 'float32')
+		################### .getMemoryShapes ################
+		batch_size = inp.shape[0] # 1
+		assert batch_size == 1
+		assert inp.shape[3] == (1+coords+classes) * anchors
+		lo_estim = np.zeros((np.prod(inp.shape[1:3]) * anchors, inp.shape[3] // anchors), 'float32')
+		################## .forward ################
+		# cell : 1 + 4 + 80, et il y en a rows*cols*anchors
+		cell_size = classes + coords + 1 # 85
+		biasData = b_f32
+		rows, cols = inp.shape[1:3]
+		hNorm, wNorm = inp_data.shape[2:]
+		sample_size = cell_size*rows*cols*anchors
+		assert sample_size == inp.size
+		assert sample_size == lo_estim.size
+		inp_r = inp.reshape((rows*cols*anchors, cell_size))
+		for x in range(cols):
+			for y in range(rows):
+				for a in range(anchors):
+					i = (y*cols + x)*anchors + a
+					lo_estim[i,4] = logistic_activate(inp_r[i,4])
+					lo_estim[i,5:] = logistic_activate(inp_r[i,5:])
+					scale = lo_estim[i,4]
+					x_tmp = (logistic_activate(inp_r[i,0]) - half_f32) * scale_x_y + half_f32
+					y_tmp = (logistic_activate(inp_r[i,1]) - half_f32) * scale_x_y + half_f32
+					lo_estim[i,0] = (x + x_tmp) / cols
+					lo_estim[i,1] = (y + y_tmp) / rows
+					lo_estim[i,2] = np.exp(inp_r[i,2]) * biasData[2 * a] / wNorm
+					lo_estim[i,3] = np.exp(inp_r[i,3]) * biasData[2 * a + 1] / hNorm
+					for j in range(classes):
+						prob = scale*lo_estim[i,j+5]
+						lo_estim[i,j+5] = prob if (prob > thresh) else 0
+		assert nmsThreshold == 0
 	elif Li.type == 'ReLU':
 		assert Li.name.startswith('relu_')
 		assert inp.shape == lo.shape

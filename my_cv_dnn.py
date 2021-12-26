@@ -311,7 +311,7 @@ def ReadDarknetFromCfg(cfg_fn, CV_450 = False):
 		elif lt == "yolo":
 			classes = lcfg.get("classes", -1)
 			num_of_anchors = lcfg.get("num", -1)
-			if CV_450:
+			if True or CV_450:
 				thresh = lcfg.get("thresh", 0.2)
 				nms_threshold = lcfg.get("nms_threshold", 0.0)
 				scale_x_y = lcfg.get("scale_x_y", 1.0)
@@ -346,7 +346,7 @@ def ReadDarknetFromCfg(cfg_fn, CV_450 = False):
 				"anchors": numAnchors,
 				"logistic": True,
 				"blobs": [usedAnchors] }
-			if CV_450:
+			if True or CV_450:
 				dnn_lp.update({
 				"thresh": thresh,
 				"nms_threshold": nms_threshold,
